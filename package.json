@@ -1,6 +1,6 @@
 {
   "name": "pi-oauth-ai-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI SDK language model adapters for Pi AI OAuth providers",
   "type": "module",
   "main": "./dist/index.js",
@@ -40,11 +40,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/derekurban2001/pi-oauth-ai-sdk.git"
+    "url": "git+https://github.com/derekurban/pi-oauth-ai-sdk.git"
   },
-  "homepage": "https://github.com/derekurban2001/pi-oauth-ai-sdk#readme",
+  "homepage": "https://github.com/derekurban/pi-oauth-ai-sdk#readme",
   "bugs": {
-    "url": "https://github.com/derekurban2001/pi-oauth-ai-sdk/issues"
+    "url": "https://github.com/derekurban/pi-oauth-ai-sdk/issues"
   },
   "publishConfig": {
     "access": "public",
