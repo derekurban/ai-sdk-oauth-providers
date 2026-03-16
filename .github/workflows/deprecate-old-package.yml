@@ -1,0 +1,23 @@
+name: Deprecate Old Package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deprecate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Deprecate pi-oauth-ai-sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm deprecate "pi-oauth-ai-sdk@*" "Deprecated in favor of ai-sdk-oauth-providers. Migrate to https://www.npmjs.com/package/ai-sdk-oauth-providers"

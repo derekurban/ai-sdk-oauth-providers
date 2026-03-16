@@ -1,206 +1,245 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-const oauthMocks = vi.hoisted(() => ({
-  provider: {
-    login: vi.fn(),
-    refreshToken: vi.fn(),
-    getApiKey: vi.fn(),
-  },
-  getOAuthProvider: vi.fn(),
-  getOAuthProviders: vi.fn(),
-  getOAuthApiKey: vi.fn(),
-  importOpenAICodexCredentialsFromCodexAuth: vi.fn(),
-  loginOpenAICodexWithDeviceAuth: vi.fn(),
-  loginOpenAICodexWithOfficialFlow: vi.fn(),
-}));
+import { OAuthAuthStore } from "./store.js";
 
-vi.mock("@mariozechner/pi-ai/oauth", () => ({
-  getOAuthProvider: oauthMocks.getOAuthProvider,
-  getOAuthProviders: oauthMocks.getOAuthProviders,
-  getOAuthApiKey: oauthMocks.getOAuthApiKey,
-}));
+function buildJwt(payload: object): string {
+  return [
+    Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url"),
+    Buffer.from(JSON.stringify(payload)).toString("base64url"),
+    "signature",
+  ].join(".");
+}
 
-vi.mock("./openai-codex-login.js", () => ({
-  importOpenAICodexCredentialsFromCodexAuth: oauthMocks.importOpenAICodexCredentialsFromCodexAuth,
-  loginOpenAICodexWithDeviceAuth: oauthMocks.loginOpenAICodexWithDeviceAuth,
-  loginOpenAICodexWithOfficialFlow: oauthMocks.loginOpenAICodexWithOfficialFlow,
-}));
-
-import { PiOAuthAuthStore } from "./store.js";
-
-describe("PiOAuthAuthStore", () => {
-  let tempDir: string;
-  let authFile: string;
-
-  beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), "pi-oauth-ai-sdk-"));
-    authFile = join(tempDir, "auth.json");
-
-    oauthMocks.provider.login.mockReset();
-    oauthMocks.provider.refreshToken.mockReset();
-    oauthMocks.provider.getApiKey.mockReset();
-    oauthMocks.getOAuthProvider.mockReset();
-    oauthMocks.getOAuthProviders.mockReset();
-    oauthMocks.getOAuthApiKey.mockReset();
-    oauthMocks.importOpenAICodexCredentialsFromCodexAuth.mockReset();
-    oauthMocks.loginOpenAICodexWithDeviceAuth.mockReset();
-    oauthMocks.loginOpenAICodexWithOfficialFlow.mockReset();
-
-    oauthMocks.getOAuthProvider.mockReturnValue(oauthMocks.provider);
-    oauthMocks.getOAuthProviders.mockReturnValue([]);
-  });
-
+describe("OAuthAuthStore", () => {
   afterEach(() => {
-    rmSync(tempDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
   });
 
-  it("stores credentials returned by login", async () => {
-    oauthMocks.provider.login.mockResolvedValue({
-      access: "access-token",
-      refresh: "refresh-token",
-      expires: Date.now() + 60_000,
+  it("creates a missing auth file and reports an unstored provider", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "oauth-store-"));
+    const authFile = join(directory, "auth.json");
+    const store = new OAuthAuthStore(authFile);
+
+    const status = await store.getStatus("anthropic");
+
+    expect(status).toEqual({
+      providerId: "anthropic",
+      stored: false,
+    });
+    expect(existsSync(authFile)).toBe(true);
+    expect(readFileSync(authFile, "utf8")).toBe("{}");
+  });
+
+  it("imports Codex auth.json and persists normalized credentials", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "oauth-store-"));
+    const authFile = join(directory, "auth.json");
+    const sourceAuthFile = join(directory, "codex-auth.json");
+    const accessToken = buildJwt({
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: "acct_imported",
+      },
     });
 
-    const store = new PiOAuthAuthStore(authFile);
-    const record = await store.login("anthropic", {
-      onAuth: vi.fn(),
-      onPrompt: vi.fn(),
-    });
+    writeFileSync(sourceAuthFile, JSON.stringify({
+      tokens: {
+        access_token: accessToken,
+        refresh_token: "refresh-token",
+        account_id: "acct_imported",
+      },
+    }), "utf8");
+
+    const store = new OAuthAuthStore(authFile);
+    const record = await store.importOpenAICodexAuth(sourceAuthFile);
 
     expect(record).toMatchObject({
       type: "oauth",
-      access: "access-token",
+      access: accessToken,
       refresh: "refresh-token",
-    });
-
-    const file = JSON.parse(readFileSync(authFile, "utf8"));
-    expect(file.anthropic).toMatchObject({
-      type: "oauth",
-      access: "access-token",
-      refresh: "refresh-token",
-    });
-  });
-
-  it("returns a direct API key for unexpired credentials", async () => {
-    const expires = Date.now() + 60_000;
-    writeFileSync(authFile, JSON.stringify({
-      anthropic: {
-        type: "oauth",
-        access: "fresh-access",
-        refresh: "fresh-refresh",
-        expires,
-      },
-    }));
-
-    oauthMocks.provider.getApiKey.mockReturnValue("resolved-api-key");
-
-    const store = new PiOAuthAuthStore(authFile);
-    const resolved = await store.resolveApiKey("anthropic");
-
-    expect(resolved.apiKey).toBe("resolved-api-key");
-    expect(resolved.credentials.access).toBe("fresh-access");
-    expect(oauthMocks.getOAuthApiKey).not.toHaveBeenCalled();
-  });
-
-  it("refreshes expired credentials and persists the update", async () => {
-    writeFileSync(authFile, JSON.stringify({
-      anthropic: {
-        type: "oauth",
-        access: "stale-access",
-        refresh: "stale-refresh",
-        expires: Date.now() - 1_000,
-      },
-    }));
-
-    oauthMocks.getOAuthApiKey.mockResolvedValue({
-      apiKey: "refreshed-api-key",
-      newCredentials: {
-        access: "new-access",
-        refresh: "new-refresh",
-        expires: Date.now() + 120_000,
-      },
-    });
-
-    const store = new PiOAuthAuthStore(authFile);
-    const resolved = await store.resolveApiKey("anthropic");
-
-    expect(resolved.apiKey).toBe("refreshed-api-key");
-    expect(resolved.credentials.access).toBe("new-access");
-
-    const file = JSON.parse(readFileSync(authFile, "utf8"));
-    expect(file.anthropic.access).toBe("new-access");
-    expect(file.anthropic.refresh).toBe("new-refresh");
-  });
-
-  it("throws a parse error for invalid auth file JSON", async () => {
-    writeFileSync(authFile, "{not-json");
-
-    const store = new PiOAuthAuthStore(authFile);
-
-    await expect(store.getStatus("anthropic")).rejects.toThrow(/Failed to parse auth file/);
-  });
-
-  it("uses the package-local OpenAI Codex login flow", async () => {
-    oauthMocks.loginOpenAICodexWithOfficialFlow.mockResolvedValue({
-      access: "codex-access",
-      refresh: "codex-refresh",
-      expires: Date.now() + 60_000,
-      accountId: "acct_123",
-    });
-
-    const store = new PiOAuthAuthStore(authFile);
-    const record = await store.login("openai-codex", {
-      onAuth: vi.fn(),
-      onPrompt: vi.fn(),
-    });
-
-    expect(oauthMocks.loginOpenAICodexWithOfficialFlow).toHaveBeenCalledTimes(1);
-    expect(oauthMocks.provider.login).not.toHaveBeenCalled();
-    expect(record.accountId).toBe("acct_123");
-  });
-
-  it("uses device auth for OpenAI Codex when requested", async () => {
-    oauthMocks.loginOpenAICodexWithDeviceAuth.mockResolvedValue({
-      access: "codex-device-access",
-      refresh: "codex-device-refresh",
-      expires: Date.now() + 60_000,
-      accountId: "acct_device",
-    });
-
-    const store = new PiOAuthAuthStore(authFile);
-    const record = await store.login("openai-codex", {
-      onAuth: vi.fn(),
-      onPrompt: vi.fn(),
-    }, { deviceAuth: true });
-
-    expect(oauthMocks.loginOpenAICodexWithDeviceAuth).toHaveBeenCalledTimes(1);
-    expect(oauthMocks.loginOpenAICodexWithOfficialFlow).not.toHaveBeenCalled();
-    expect(record.accountId).toBe("acct_device");
-  });
-
-  it("imports OpenAI Codex credentials from auth.json", async () => {
-    oauthMocks.importOpenAICodexCredentialsFromCodexAuth.mockReturnValue({
-      access: "imported-access",
-      refresh: "imported-refresh",
-      expires: Date.now() + 60_000,
       accountId: "acct_imported",
     });
-
-    const store = new PiOAuthAuthStore(authFile);
-    const record = await store.importOpenAICodexAuth("D:/tmp/.codex/auth.json");
-
-    expect(oauthMocks.importOpenAICodexCredentialsFromCodexAuth).toHaveBeenCalledWith("D:/tmp/.codex/auth.json");
-    expect(record.accountId).toBe("acct_imported");
-
-    const file = JSON.parse(readFileSync(authFile, "utf8"));
-    expect(file["openai-codex"]).toMatchObject({
-      type: "oauth",
-      access: "imported-access",
-      refresh: "imported-refresh",
+    expect(await store.getRecord("openai-codex")).toMatchObject({
+      access: accessToken,
+      refresh: "refresh-token",
+      accountId: "acct_imported",
     });
+  });
+
+  it("refreshes expired Codex credentials and persists the update", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "oauth-store-"));
+    const authFile = join(directory, "auth.json");
+    const expiredAccess = buildJwt({
+      exp: Math.floor(Date.now() / 1000) - 60,
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: "acct_before",
+      },
+    });
+    const refreshedAccess = buildJwt({
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: "acct_after",
+      },
+    });
+
+    writeFileSync(authFile, JSON.stringify({
+      "openai-codex": {
+        type: "oauth",
+        access: expiredAccess,
+        refresh: "refresh-before",
+        expires: Date.now() - 60_000,
+        accountId: "acct_before",
+      },
+    }), "utf8");
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      access_token: refreshedAccess,
+      refresh_token: "refresh-after",
+      expires_in: 3600,
+    }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+      },
+    })));
+
+    const store = new OAuthAuthStore(authFile);
+    const record = await store.getCredentials("openai-codex");
+
+    expect(record.access).toBe(refreshedAccess);
+    expect(record.refresh).toBe("refresh-after");
+    expect(record.accountId).toBe("acct_after");
+
+    const persisted = JSON.parse(readFileSync(authFile, "utf8")) as {
+      "openai-codex": { access: string; refresh: string; accountId: string };
+    };
+
+    expect(persisted["openai-codex"].access).toBe(refreshedAccess);
+    expect(persisted["openai-codex"].refresh).toBe("refresh-after");
+    expect(persisted["openai-codex"].accountId).toBe("acct_after");
+  });
+
+  it("serializes concurrent refreshes under the file lock", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "oauth-store-"));
+    const authFile = join(directory, "auth.json");
+    const expiredAccess = buildJwt({
+      exp: Math.floor(Date.now() / 1000) - 60,
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: "acct_before",
+      },
+    });
+    const refreshedAccess = buildJwt({
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: "acct_after",
+      },
+    });
+
+    writeFileSync(authFile, JSON.stringify({
+      "openai-codex": {
+        type: "oauth",
+        access: expiredAccess,
+        refresh: "refresh-before",
+        expires: Date.now() - 60_000,
+        accountId: "acct_before",
+      },
+    }), "utf8");
+
+    const fetchSpy = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return new Response(JSON.stringify({
+        access_token: refreshedAccess,
+        refresh_token: "refresh-after",
+        expires_in: 3600,
+      }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+        },
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const firstStore = new OAuthAuthStore(authFile);
+    const secondStore = new OAuthAuthStore(authFile);
+    const [first, second] = await Promise.all([
+      firstStore.getCredentials("openai-codex"),
+      secondStore.getCredentials("openai-codex"),
+    ]);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(first.access).toBe(refreshedAccess);
+    expect(second.access).toBe(refreshedAccess);
+  });
+
+  it("removes stored credentials on logout", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "oauth-store-"));
+    const authFile = join(directory, "auth.json");
+
+    writeFileSync(authFile, JSON.stringify({
+      anthropic: {
+        type: "oauth",
+        access: "access",
+        refresh: "refresh",
+        expires: Date.now() + 60_000,
+      },
+    }), "utf8");
+
+    const store = new OAuthAuthStore(authFile);
+    await store.logout("anthropic");
+
+    expect(await store.getRecord("anthropic")).toBeUndefined();
+  });
+
+  it("throws on corrupt auth files", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "oauth-store-"));
+    const authFile = join(directory, "auth.json");
+    writeFileSync(authFile, "{not-json", "utf8");
+
+    const store = new OAuthAuthStore(authFile);
+
+    await expect(store.getStatus("anthropic")).rejects.toThrow("Failed to parse auth file");
+  });
+
+  it("throws when no credentials are stored for a provider", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "oauth-store-"));
+    const authFile = join(directory, "auth.json");
+    const store = new OAuthAuthStore(authFile);
+
+    await expect(store.getCredentials("anthropic")).rejects.toThrow("No stored OAuth credentials for provider: anthropic");
+  });
+
+  it("surfaces refresh failures", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "oauth-store-"));
+    const authFile = join(directory, "auth.json");
+    const expiredAccess = buildJwt({
+      exp: Math.floor(Date.now() / 1000) - 60,
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: "acct_before",
+      },
+    });
+
+    writeFileSync(authFile, JSON.stringify({
+      "openai-codex": {
+        type: "oauth",
+        access: expiredAccess,
+        refresh: "refresh-before",
+        expires: Date.now() - 60_000,
+        accountId: "acct_before",
+      },
+    }), "utf8");
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("bad gateway", {
+      status: 502,
+      headers: {
+        "content-type": "text/plain",
+      },
+    })));
+
+    const store = new OAuthAuthStore(authFile);
+    await expect(store.getCredentials("openai-codex")).rejects.toThrow("OpenAI Codex token exchange failed with status 502");
   });
 });

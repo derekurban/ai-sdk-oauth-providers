@@ -2,12 +2,9 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stderr, stdin, stdout } from "node:process";
 
-import { getOAuthProviders } from "@mariozechner/pi-ai/oauth";
-
 import { resolveDefaultCodexAuthFile } from "./auth/openai-codex-login.js";
-import { PiOAuthAuthStore } from "./auth/store.js";
-import { runInteractiveUi } from "./cli-ui.js";
-import { isPiOAuthProviderId, type PiOAuthProviderId } from "./types.js";
+import { OAuthAuthStore } from "./auth/store.js";
+import { isOAuthProviderId, type OAuthProviderId } from "./types.js";
 
 export async function runCli(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
@@ -28,9 +25,6 @@ export async function runCli(argv: string[]): Promise<void> {
     case "import-codex-auth":
       await handleImportCodexAuth(rest);
       return;
-    case "ui":
-      await handleUi(rest);
-      return;
     case "help":
     case "--help":
     case "-h":
@@ -45,7 +39,7 @@ export async function runCli(argv: string[]): Promise<void> {
 async function handleStatus(args: string[]): Promise<void> {
   const providerId = readProviderId(args);
   const authFile = readRequiredFlag(args, "--auth-file");
-  const store = new PiOAuthAuthStore(authFile);
+  const store = new OAuthAuthStore(authFile);
   const status = await store.getStatus(providerId);
 
   stdout.write(`${providerId}\n`);
@@ -63,7 +57,8 @@ async function handleLogin(args: string[]): Promise<void> {
   if (deviceAuth && providerId !== "openai-codex") {
     throw new Error("--device-auth is only supported for provider 'openai-codex'.");
   }
-  const store = new PiOAuthAuthStore(authFile);
+
+  const store = new OAuthAuthStore(authFile);
   const rl = createInterface({ input: stdin, output: stdout });
 
   try {
@@ -97,7 +92,7 @@ async function handleLogin(args: string[]): Promise<void> {
 async function handleLogout(args: string[]): Promise<void> {
   const providerId = readProviderId(args);
   const authFile = readRequiredFlag(args, "--auth-file");
-  const store = new PiOAuthAuthStore(authFile);
+  const store = new OAuthAuthStore(authFile);
   await store.logout(providerId);
   stdout.write(`Removed stored OAuth credentials for ${providerId}\n`);
 }
@@ -106,23 +101,15 @@ async function handleImportCodexAuth(args: string[]): Promise<void> {
   const authFile = readRequiredFlag(args, "--auth-file");
   const sourceAuthFile = readOptionalFlag(args, "--source")
     ?? resolveDefaultCodexAuthFile(readOptionalFlag(args, "--codex-home"));
-  const store = new PiOAuthAuthStore(authFile);
+  const store = new OAuthAuthStore(authFile);
   const record = await store.importOpenAICodexAuth(sourceAuthFile);
   stdout.write(`Imported OpenAI Codex credentials from ${sourceAuthFile}\n`);
   stdout.write(`expiresAt: ${new Date(record.expires).toISOString()}\n`);
 }
 
-async function handleUi(args: string[]): Promise<void> {
-  const authFile = readRequiredFlag(args, "--auth-file");
-  const codexHome = readOptionalFlag(args, "--codex-home");
-  await runInteractiveUi({
-    authFile,
-    ...(codexHome ? { codexHome } : {}),
-  });
-}
-
 function printProviders(): void {
-  for (const provider of getOAuthProviders()) {
+  const store = new OAuthAuthStore("unused");
+  for (const provider of store.getProviders()) {
     stdout.write(`${provider.id}\t${provider.name}`);
     if (provider.usesCallbackServer) {
       stdout.write("\tcallback-server");
@@ -132,20 +119,19 @@ function printProviders(): void {
 }
 
 function printHelp(): void {
-  stdout.write("pi-oauth-ai-sdk\n\n");
+  stdout.write("ai-sdk-oauth-providers\n\n");
   stdout.write("Commands:\n");
-  stdout.write("  pi-oauth-ai-sdk providers\n");
-  stdout.write("  pi-oauth-ai-sdk login --provider <id> --auth-file <path>\n");
-  stdout.write("  pi-oauth-ai-sdk login --provider openai-codex --auth-file <path> --device-auth\n");
-  stdout.write("  pi-oauth-ai-sdk import-codex-auth --auth-file <path> [--source <auth.json>] [--codex-home <dir>]\n");
-  stdout.write("  pi-oauth-ai-sdk logout --provider <id> --auth-file <path>\n");
-  stdout.write("  pi-oauth-ai-sdk status --provider <id> --auth-file <path>\n");
-  stdout.write("  pi-oauth-ai-sdk ui --auth-file <path> [--codex-home <dir>]\n");
+  stdout.write("  ai-sdk-oauth-providers providers\n");
+  stdout.write("  ai-sdk-oauth-providers login --provider <id> --auth-file <path>\n");
+  stdout.write("  ai-sdk-oauth-providers login --provider openai-codex --auth-file <path> --device-auth\n");
+  stdout.write("  ai-sdk-oauth-providers import-codex-auth --auth-file <path> [--source <auth.json>] [--codex-home <dir>]\n");
+  stdout.write("  ai-sdk-oauth-providers logout --provider <id> --auth-file <path>\n");
+  stdout.write("  ai-sdk-oauth-providers status --provider <id> --auth-file <path>\n");
 }
 
-function readProviderId(args: string[]): PiOAuthProviderId {
+function readProviderId(args: string[]): OAuthProviderId {
   const value = readRequiredFlag(args, "--provider");
-  if (!isPiOAuthProviderId(value)) {
+  if (!isOAuthProviderId(value)) {
     throw new Error(`Unknown provider '${value}'.`);
   }
   return value;

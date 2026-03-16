@@ -1,231 +1,213 @@
-# pi-oauth-ai-sdk
+# ai-sdk-oauth-providers
 
-`pi-oauth-ai-sdk` exposes OAuth-backed Pi AI providers as AI SDK language models.
+OAuth-backed AI SDK `ProviderV3` implementations for:
 
-It is built for one job: reuse the OAuth flows and token refresh behavior from [`@mariozechner/pi-ai`](https://www.npmjs.com/package/@mariozechner/pi-ai), then surface those providers through a small API that fits the AI SDK provider model.
+- OpenAI Codex
+- Anthropic OAuth / Claude Code
+- Gemini CLI / Google Cloud Code Assist
 
-## Features
+This package targets Node 20+, AI SDK v6, and latest Mastra. It uses
+`@mariozechner/pi-ai/oauth` for login and refresh only, then talks to each
+provider with package-owned transports.
 
-- Supports Pi AI OAuth providers without reimplementing their login flows
-- Persists credentials to a JSON auth file you control
-- Refreshes expired tokens automatically
-- Exposes AI SDK `LanguageModelV2` and `LanguageModelV3` adapters
-- Includes a CLI for `login`, `logout`, `status`, and provider discovery
-- Supports OpenAI Codex device auth
-- Can import existing OpenAI Codex credentials from `~/.codex/auth.json`
-- Includes a minimal interactive terminal UI
+`pi-oauth-ai-sdk` is being retired in favor of this package. New integration
+work should target `ai-sdk-oauth-providers`.
 
-## Supported Providers
+## Scope
 
-- `anthropic`
-- `github-copilot`
-- `openai-codex`
-- `google-gemini-cli`
-- `google-antigravity`
+This package is intentionally scoped to AI SDK language models:
 
-## Installation
+- text generation
+- streaming
+- tool calling
+- JSON compatibility mode for object generation
+- OAuth login, refresh, and local credential persistence
 
-```bash
-npm install pi-oauth-ai-sdk
-```
+It does not implement embeddings, images, speech, transcription, reranking, or
+multimodal file/url handling in `v1`.
 
-## Quick Start
-
-If you already use the official Codex CLI, import that login into a local auth file:
+## Install
 
 ```bash
-npx pi-oauth-ai-sdk import-codex-auth --auth-file ./.auth/pi-oauth.json
+npm install ai @ai-sdk/provider ai-sdk-oauth-providers
 ```
 
-If you want this package to handle Codex login directly, use device auth:
+## Verified Baseline
+
+Last verified: March 16, 2026
+
+- `ai@6.0.116`
+- `@ai-sdk/provider@3.0.8`
+- `@mastra/core@1.13.2`
+- `@mariozechner/pi-ai@0.58.4` for OAuth only
+
+The detailed compatibility matrix lives in
+[`docs/compatibility.md`](./docs/compatibility.md).
+
+## Providers
+
+| Provider factory | OAuth source | Notes |
+| --- | --- | --- |
+| `createOpenAICodexOAuth` | ChatGPT / Codex OAuth | Experimental. Prefer importing existing Codex auth or device auth. |
+| `createAnthropicOAuth` | Anthropic OAuth / Claude Code | Uses direct Messages API transport with Claude Code OAuth headers. |
+| `createGeminiCliOAuth` | Gemini CLI / Cloud Code Assist OAuth | Requires persisted `projectId`. |
+
+## CLI
+
+The package ships a CLI for auth management:
 
 ```bash
-npx pi-oauth-ai-sdk login --provider openai-codex --auth-file ./.auth/pi-oauth.json --device-auth
+npx ai-sdk-oauth-providers providers
 ```
-
-You can also use the browser login flow:
 
 ```bash
-npx pi-oauth-ai-sdk login --provider openai-codex --auth-file ./.auth/pi-oauth.json
+npx ai-sdk-oauth-providers login --provider anthropic --auth-file ./.auth/oauth.json
 ```
 
-Then use that auth file from your application:
+```bash
+npx ai-sdk-oauth-providers login --provider openai-codex --auth-file ./.auth/oauth.json --device-auth
+```
+
+```bash
+npx ai-sdk-oauth-providers import-codex-auth --auth-file ./.auth/oauth.json
+```
+
+```bash
+npx ai-sdk-oauth-providers status --provider google-gemini-cli --auth-file ./.auth/oauth.json
+```
+
+```bash
+npx ai-sdk-oauth-providers logout --provider openai-codex --auth-file ./.auth/oauth.json
+```
+
+### Codex auth guidance
+
+For Codex, the recommended order is:
+
+1. `import-codex-auth` from an existing official Codex CLI login
+2. `login --device-auth`
+3. browser OAuth fallback
+
+Browser OAuth is kept for completeness, but the underlying Codex auth contract
+has drifted historically and is documented as experimental.
+
+## AI SDK Usage
+
+### Direct provider
 
 ```ts
-import { generateText, streamText } from "ai";
-import { createOpenAICodexProvider } from "pi-oauth-ai-sdk";
+import { generateText } from "ai";
+import { createOpenAICodexOAuth } from "ai-sdk-oauth-providers";
 
-const provider = createOpenAICodexProvider({
-  authFile: "./.auth/pi-oauth.json",
+const codex = createOpenAICodexOAuth({
+  authFile: "./.auth/oauth.json",
 });
 
-const model = provider.languageModelV3("gpt-5.4");
-
 const result = await generateText({
-  model,
-  prompt: "Reply with exactly: pong-from-codex",
-  maxOutputTokens: 32,
+  model: codex.languageModel("gpt-5.4"),
+  prompt: "Reply with exactly: pong",
 });
 
 console.log(result.text);
-
-const streamed = streamText({
-  model,
-  prompt: "Reply with exactly: streamed-pong-from-codex",
-  maxOutputTokens: 32,
-});
-
-for await (const chunk of streamed.textStream) {
-  process.stdout.write(chunk);
-}
 ```
 
-That flow was tested live against imported Codex credentials during package development.
+### Provider registry composition
 
-## API
-
-The package exports one factory per supported provider:
-
-- `createAnthropicProvider`
-- `createGitHubCopilotProvider`
-- `createOpenAICodexProvider`
-- `createGeminiCliProvider`
-- `createAntigravityProvider`
-
-Each factory accepts:
+Use AI SDK's native `createProviderRegistry` when you want one shared registry:
 
 ```ts
-{
-  authFile: string;
-  fetch?: typeof globalThis.fetch;
-}
+import { createProviderRegistry, generateText } from "ai";
+import {
+  createAnthropicOAuth,
+  createGeminiCliOAuth,
+  createOpenAICodexOAuth,
+} from "ai-sdk-oauth-providers";
+
+const authFile = "./.auth/oauth.json";
+
+const registry = createProviderRegistry({
+  providers: {
+    codex: createOpenAICodexOAuth({ authFile }),
+    anthropic: createAnthropicOAuth({ authFile }),
+    gemini: createGeminiCliOAuth({ authFile }),
+  },
+});
+
+const result = await generateText({
+  model: registry.languageModel("codex:gpt-5.4"),
+  prompt: "Reply with exactly: registry-ok",
+});
+
+console.log(result.text);
 ```
 
-Each provider instance exposes:
+### Object generation
 
-- `languageModelV2(modelId: string)`
-- `languageModelV3(modelId: string)`
+This package currently uses a deterministic JSON compatibility mode rather than
+claiming a native vendor-specific JSON schema contract for every OAuth backend.
+That means `generateObject` and `streamObject` work by steering the backend to
+return raw JSON text that AI SDK then validates.
 
-## Mastra Compatibility
+## Mastra Usage
 
-Latest Mastra currently has two agent-level issues that affect this package's AI SDK models:
-
-- `Agent.generate(..., { output })` drops `output` before it reaches Mastra's structured output path
-- per-call `clientTools` lose their executor during Mastra tool conversion
-
-This package includes a small workaround helper for that case:
+Latest Mastra still has agent-layer bugs around `output` and `clientTools`.
+This package ships `withMastraCompat(...)` as a pragmatic wrapper:
 
 ```ts
 import { Agent } from "@mastra/core/agent";
 import { tool } from "ai";
 import { z } from "zod";
 
-import { createOpenAICodexProvider, withMastraCompat } from "pi-oauth-ai-sdk";
+import { createOpenAICodexOAuth } from "ai-sdk-oauth-providers";
+import { withMastraCompat } from "ai-sdk-oauth-providers/mastra";
 
-const provider = createOpenAICodexProvider({
-  authFile: "./.auth/pi-oauth.json",
+const provider = createOpenAICodexOAuth({
+  authFile: "./.auth/oauth.json",
 });
 
-const model = provider.languageModelV3("gpt-5.4");
-
-const weather = tool({
-  description: "Return a canned weather string for a city.",
+const weatherTool = tool({
+  description: "Return a canned weather forecast.",
   inputSchema: z.object({
     city: z.string(),
   }),
-  execute: async ({ city }) => {
-    return { forecast: `clear-skies-for-${city.toLowerCase()}` };
-  },
+  execute: async ({ city }) => ({
+    forecast: `clear-skies-for-${city.toLowerCase()}`,
+  }),
 });
 
 const agent = withMastraCompat(new Agent({
-  id: "codex-master",
-  name: "Codex Master",
+  id: "oauth-agent",
+  name: "OAuth Agent",
   instructions: "You are a concise assistant.",
-  model,
+  model: provider.languageModel("gpt-5.4"),
+  tools: {
+    weather: weatherTool,
+  },
 }));
 
-const toolResult = await agent.generate(
+const result = await agent.generate(
   "Use the weather tool for Calgary, then reply with exactly the forecast string and nothing else.",
-  {
-    clientTools: { weather },
-    maxSteps: 3,
-  },
+  { maxSteps: 3 },
 );
 
-console.log(toolResult.text);
-
-const structured = await agent.generate(
-  "Return an object with status set to ok and code set to 7.",
-  {
-    output: z.object({
-      status: z.string(),
-      code: z.number(),
-    }),
-  },
-);
-
-console.log(structured.object);
+console.log(result.text);
 ```
 
-`withMastraCompat(...)` does two things:
+`withMastraCompat(...)` currently does two things:
 
-- maps `output` to Mastra's `structuredOutput` option
-- temporarily promotes per-call `clientTools` into agent tools for that call, then restores the original tool set
+- maps `output` to `structuredOutput`
+- temporarily promotes per-call `clientTools` into agent tools for that call
 
-## CLI
+## Contract Docs
 
-```bash
-pi-oauth-ai-sdk providers
-pi-oauth-ai-sdk import-codex-auth --auth-file ./.auth/pi-oauth.json
-pi-oauth-ai-sdk login --provider openai-codex --auth-file ./.auth/pi-oauth.json --device-auth
-pi-oauth-ai-sdk login --provider openai-codex --auth-file ./.auth/pi-oauth.json
-pi-oauth-ai-sdk status --provider openai-codex --auth-file ./.auth/pi-oauth.json
-pi-oauth-ai-sdk logout --provider openai-codex --auth-file ./.auth/pi-oauth.json
-pi-oauth-ai-sdk ui --auth-file ./.auth/pi-oauth.json
-```
+Transport and compatibility references live here:
 
-`providers` prints the provider ids supported by the installed version of `@mariozechner/pi-ai`.
+- [`docs/contracts/ai-sdk-v3-baseline.md`](./docs/contracts/ai-sdk-v3-baseline.md)
+- [`docs/contracts/openai-codex-oauth.md`](./docs/contracts/openai-codex-oauth.md)
+- [`docs/contracts/anthropic-oauth.md`](./docs/contracts/anthropic-oauth.md)
+- [`docs/contracts/gemini-cli-oauth.md`](./docs/contracts/gemini-cli-oauth.md)
+- [`docs/compatibility.md`](./docs/compatibility.md)
+- [`docs/maintenance.md`](./docs/maintenance.md)
 
-### OpenAI Codex options
-
-- Browser login: `login --provider openai-codex --auth-file <path>`
-- Device auth: `login --provider openai-codex --auth-file <path> --device-auth`
-- Import from official Codex auth: `import-codex-auth --auth-file <path>`
-
-`import-codex-auth` auto-detects `CODEX_HOME/auth.json` or `~/.codex/auth.json` unless you provide `--source` or `--codex-home`.
-
-### Interactive UI
-
-The `ui` command opens a minimal terminal menu for login, Codex auth import, status checks, logout, and provider listing:
-
-```bash
-pi-oauth-ai-sdk ui --auth-file ./.auth/pi-oauth.json
-```
-
-## Auth Storage
-
-Credentials are stored in a JSON file keyed by provider id. The file is managed by the package and refreshed credentials are written back automatically after token renewal.
-
-Example:
-
-```json
-{
-  "openai-codex": {
-    "type": "oauth",
-    "access": "...",
-    "refresh": "...",
-    "expires": 1760000000000
-  }
-}
-```
-
-## Release Process
-
-This repository includes GitHub Actions for:
-
-- CI on pushes to `main` and pull requests
-- npm publishing on version tags matching `v*`
-- manual publish reruns for an existing tag through `workflow_dispatch`
-
-To publish from GitHub Actions, add an `NPM_TOKEN` repository secret with permission to publish the package.
+These files are the reference point for future contract drift, compatibility
+updates, and release maintenance.

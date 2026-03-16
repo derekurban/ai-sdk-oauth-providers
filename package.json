@@ -1,7 +1,7 @@
 {
-  "name": "pi-oauth-ai-sdk",
-  "version": "0.1.8",
-  "description": "AI SDK language model adapters for Pi AI OAuth providers",
+  "name": "ai-sdk-oauth-providers",
+  "version": "0.2.0",
+  "description": "OAuth-backed AI SDK V3 providers for Codex, Anthropic, and Gemini CLI",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -9,14 +9,21 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./mastra": {
+      "types": "./dist/mastra.d.ts",
+      "import": "./dist/mastra.js"
+    },
+    "./package.json": "./package.json"
   },
   "bin": {
-    "pi-oauth-ai-sdk": "./dist/cli.js"
+    "ai-sdk-oauth-providers": "./dist/cli.js"
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "docs"
   ],
   "engines": {
     "node": ">=20.0.0"
@@ -32,19 +39,20 @@
     "ai",
     "ai-sdk",
     "oauth",
+    "codex",
     "anthropic",
-    "openai",
-    "copilot",
-    "gemini"
+    "claude",
+    "gemini",
+    "mastra"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/derekurban/pi-oauth-ai-sdk.git"
+    "url": "git+https://github.com/derekurban/ai-sdk-oauth-providers.git"
   },
-  "homepage": "https://github.com/derekurban/pi-oauth-ai-sdk#readme",
+  "homepage": "https://github.com/derekurban/ai-sdk-oauth-providers#readme",
   "bugs": {
-    "url": "https://github.com/derekurban/pi-oauth-ai-sdk/issues"
+    "url": "https://github.com/derekurban/ai-sdk-oauth-providers/issues"
   },
   "publishConfig": {
     "access": "public",
@@ -52,14 +60,16 @@
   },
   "dependencies": {
     "@ai-sdk/provider": "^3.0.8",
-    "@mariozechner/pi-ai": "^0.58.3",
+    "@mariozechner/pi-ai": "^0.58.4",
     "proper-lockfile": "^4.1.2"
   },
   "devDependencies": {
+    "@mastra/core": "^1.13.2",
     "@types/node": "^24.7.2",
     "ai": "^6.0.116",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.0",
+    "zod": "^4.1.5"
   }
 }

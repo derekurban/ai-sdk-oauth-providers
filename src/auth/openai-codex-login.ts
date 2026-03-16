@@ -1,23 +1,23 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createHash, randomBytes } from "node:crypto";
 
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@mariozechner/pi-ai/oauth";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTH_BASE_URL = "https://auth.openai.com";
-const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
-const TOKEN_URL = "https://auth.openai.com/oauth/token";
+const AUTHORIZE_URL = `${AUTH_BASE_URL}/oauth/authorize`;
+const TOKEN_URL = `${AUTH_BASE_URL}/oauth/token`;
 const CALLBACK_PORT = 1455;
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/auth/callback`;
+const DEVICE_AUTH_REDIRECT_URI = `${AUTH_BASE_URL}/deviceauth/callback`;
 const SCOPE = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const ORIGINATOR = "codex_cli_rs";
 const DEVICE_AUTH_USER_CODE_URL = `${AUTH_BASE_URL}/api/accounts/deviceauth/usercode`;
 const DEVICE_AUTH_TOKEN_URL = `${AUTH_BASE_URL}/api/accounts/deviceauth/token`;
 const DEVICE_AUTH_VERIFICATION_URL = `${AUTH_BASE_URL}/codex/device`;
-const DEVICE_AUTH_REDIRECT_URI = `${AUTH_BASE_URL}/deviceauth/callback`;
 
 const SUCCESS_HTML = `<!doctype html>
 <html lang="en">
@@ -30,16 +30,6 @@ const SUCCESS_HTML = `<!doctype html>
   <p>Authentication successful. Return to your terminal to continue.</p>
 </body>
 </html>`;
-
-type TokenResult =
-  | { type: "success"; access: string; refresh: string; expires: number }
-  | { type: "failed" };
-
-type OAuthServerInfo = {
-  close: () => void;
-  cancelWait: () => void;
-  waitForCode: () => Promise<{ code: string } | null>;
-};
 
 type JwtPayload = {
   exp?: number;
@@ -60,46 +50,33 @@ type DeviceCodePollSuccess = {
   code_verifier: string;
 };
 
+type TokenResponse = {
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+};
+
+type OAuthServerInfo = {
+  close: () => void;
+  cancelWait: () => void;
+  waitForCode: () => Promise<{ code: string } | null>;
+};
+
+function createState(): string {
+  return randomBytes(32).toString("base64url");
+}
+
 function generatePkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   return { verifier, challenge };
 }
 
-function createState(): string {
-  return randomBytes(32).toString("base64url");
-}
-
-export function buildOpenAICodexAuthorizeUrl(input: {
-  redirectUri: string;
-  challenge: string;
-  state: string;
-  originator?: string;
-}): string {
-  const originator = input.originator ?? ORIGINATOR;
-  const params: Array<[string, string]> = [
-    ["response_type", "code"],
-    ["client_id", CLIENT_ID],
-    ["redirect_uri", input.redirectUri],
-    ["scope", SCOPE],
-    ["code_challenge", input.challenge],
-    ["code_challenge_method", "S256"],
-    ["id_token_add_organizations", "true"],
-    ["codex_cli_simplified_flow", "true"],
-    ["state", input.state],
-    ["originator", originator],
-  ];
-
-  const query = params
-    .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
-    .join("&");
-
-  return `${AUTHORIZE_URL}?${query}`;
-}
-
 function parseAuthorizationInput(input: string): { code?: string; state?: string } {
   const value = input.trim();
-  if (!value) return {};
+  if (!value) {
+    return {};
+  }
 
   try {
     const url = new URL(value);
@@ -164,7 +141,54 @@ function getAccessTokenExpiry(accessToken: string): number | null {
   return payload.exp * 1000;
 }
 
-async function exchangeAuthorizationCode(code: string, verifier: string, redirectUri: string): Promise<TokenResult> {
+export function buildOpenAICodexAuthorizeUrl(input: {
+  redirectUri: string;
+  challenge: string;
+  state: string;
+  originator?: string;
+}): string {
+  const originator = input.originator ?? ORIGINATOR;
+  const params: Array<[string, string]> = [
+    ["response_type", "code"],
+    ["client_id", CLIENT_ID],
+    ["redirect_uri", input.redirectUri],
+    ["scope", SCOPE],
+    ["code_challenge", input.challenge],
+    ["code_challenge_method", "S256"],
+    ["id_token_add_organizations", "true"],
+    ["codex_cli_simplified_flow", "true"],
+    ["state", input.state],
+    ["originator", originator],
+  ];
+
+  const query = params.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join("&");
+  return `${AUTHORIZE_URL}?${query}`;
+}
+
+async function readTokenResponse(response: Response): Promise<OAuthCredentials> {
+  if (!response.ok) {
+    throw new Error(`OpenAI Codex token exchange failed with status ${response.status}`);
+  }
+
+  const json = await response.json() as TokenResponse;
+  if (!json.access_token || !json.refresh_token || typeof json.expires_in !== "number") {
+    throw new Error("OpenAI Codex token exchange returned an invalid payload");
+  }
+
+  const accountId = getAccountId(json.access_token);
+  if (!accountId) {
+    throw new Error("Failed to derive ChatGPT account ID from the access token");
+  }
+
+  return {
+    access: json.access_token,
+    refresh: json.refresh_token,
+    expires: Date.now() + json.expires_in * 1000,
+    accountId,
+  };
+}
+
+async function exchangeAuthorizationCode(code: string, verifier: string, redirectUri: string): Promise<OAuthCredentials> {
   const response = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -177,26 +201,21 @@ async function exchangeAuthorizationCode(code: string, verifier: string, redirec
     }),
   });
 
-  if (!response.ok) {
-    return { type: "failed" };
-  }
+  return readTokenResponse(response);
+}
 
-  const json = (await response.json()) as {
-    access_token?: string;
-    refresh_token?: string;
-    expires_in?: number;
-  };
+export async function refreshOpenAICodexCredentials(refreshToken: string): Promise<OAuthCredentials> {
+  const response = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: CLIENT_ID,
+    }),
+  });
 
-  if (!json.access_token || !json.refresh_token || typeof json.expires_in !== "number") {
-    return { type: "failed" };
-  }
-
-  return {
-    type: "success",
-    access: json.access_token,
-    refresh: json.refresh_token,
-    expires: Date.now() + json.expires_in * 1000,
-  };
+  return readTokenResponse(response);
 }
 
 async function requestDeviceCode(): Promise<{ deviceAuthId: string; userCode: string; intervalSeconds: number }> {
@@ -210,7 +229,7 @@ async function requestDeviceCode(): Promise<{ deviceAuthId: string; userCode: st
     throw new Error(`Device code request failed with status ${response.status}`);
   }
 
-  const json = (await response.json()) as Partial<DeviceCodeResponse>;
+  const json = await response.json() as Partial<DeviceCodeResponse>;
   const intervalRaw = typeof json.interval === "string" ? Number.parseInt(json.interval, 10) : json.interval;
 
   if (
@@ -219,7 +238,7 @@ async function requestDeviceCode(): Promise<{ deviceAuthId: string; userCode: st
     || typeof intervalRaw !== "number"
     || !Number.isFinite(intervalRaw)
   ) {
-    throw new Error("Invalid device code response");
+    throw new Error("Invalid OpenAI Codex device auth payload");
   }
 
   return {
@@ -247,13 +266,13 @@ async function pollDeviceCodeAuthorization(
     });
 
     if (response.ok) {
-      const json = (await response.json()) as Partial<DeviceCodePollSuccess>;
+      const json = await response.json() as Partial<DeviceCodePollSuccess>;
       if (
         typeof json.authorization_code !== "string"
         || typeof json.code_challenge !== "string"
         || typeof json.code_verifier !== "string"
       ) {
-        throw new Error("Invalid device auth completion response");
+        throw new Error("Invalid OpenAI Codex device auth completion payload");
       }
 
       return {
@@ -270,7 +289,7 @@ async function pollDeviceCodeAuthorization(
     await new Promise((resolve) => setTimeout(resolve, intervalSeconds * 1000));
   }
 
-  throw new Error("Device auth timed out after 15 minutes");
+  throw new Error("OpenAI Codex device auth timed out after 15 minutes");
 }
 
 async function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
@@ -312,7 +331,7 @@ async function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", (error: NodeJS.ErrnoException) => {
       if (error.code === "EADDRINUSE") {
-        reject(new Error(`OpenAI Codex OAuth requires port ${CALLBACK_PORT} to be available on localhost.`));
+        reject(new Error(`OpenAI Codex OAuth requires localhost:${CALLBACK_PORT} to be available.`));
         return;
       }
       reject(error);
@@ -328,8 +347,12 @@ async function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
     waitForCode: async () => {
       const sleep = () => new Promise((resolve) => setTimeout(resolve, 100));
       for (let i = 0; i < 600; i += 1) {
-        if (lastCode) return { code: lastCode };
-        if (cancelled) return null;
+        if (lastCode) {
+          return { code: lastCode };
+        }
+        if (cancelled) {
+          return null;
+        }
         await sleep();
       }
       return null;
@@ -337,7 +360,7 @@ async function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
   };
 }
 
-export async function loginOpenAICodexWithOfficialFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
+export async function loginOpenAICodexWithBrowserAuth(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
   const { verifier, challenge } = generatePkce();
   const state = createState();
   const server = await startLocalOAuthServer(state);
@@ -419,22 +442,7 @@ export async function loginOpenAICodexWithOfficialFlow(callbacks: OAuthLoginCall
       throw new Error("Missing authorization code");
     }
 
-    const tokenResult = await exchangeAuthorizationCode(code, verifier, REDIRECT_URI);
-    if (tokenResult.type !== "success") {
-      throw new Error("Token exchange failed");
-    }
-
-    const accountId = getAccountId(tokenResult.access);
-    if (!accountId) {
-      throw new Error("Failed to extract accountId from token");
-    }
-
-    return {
-      access: tokenResult.access,
-      refresh: tokenResult.refresh,
-      expires: tokenResult.expires,
-      accountId,
-    };
+    return exchangeAuthorizationCode(code, verifier, REDIRECT_URI);
   } finally {
     server.close();
   }
@@ -447,7 +455,7 @@ export async function loginOpenAICodexWithDeviceAuth(callbacks: OAuthLoginCallba
     url: DEVICE_AUTH_VERIFICATION_URL,
     instructions: `Enter code: ${deviceCode.userCode}`,
   });
-  callbacks.onProgress?.("Waiting for device authorization...");
+  callbacks.onProgress?.("Waiting for OpenAI Codex device authorization...");
 
   const completed = await pollDeviceCodeAuthorization(
     deviceCode.deviceAuthId,
@@ -455,27 +463,11 @@ export async function loginOpenAICodexWithDeviceAuth(callbacks: OAuthLoginCallba
     deviceCode.intervalSeconds,
   );
 
-  const tokenResult = await exchangeAuthorizationCode(
+  return exchangeAuthorizationCode(
     completed.authorization_code,
     completed.code_verifier,
     DEVICE_AUTH_REDIRECT_URI,
   );
-
-  if (tokenResult.type !== "success") {
-    throw new Error("Device code exchange failed");
-  }
-
-  const accountId = getAccountId(tokenResult.access);
-  if (!accountId) {
-    throw new Error("Failed to extract accountId from token");
-  }
-
-  return {
-    access: tokenResult.access,
-    refresh: tokenResult.refresh,
-    expires: tokenResult.expires,
-    accountId,
-  };
 }
 
 export function resolveDefaultCodexAuthFile(codexHome?: string): string {
@@ -499,7 +491,6 @@ export function importOpenAICodexCredentialsFromCodexAuth(sourceAuthFile: string
 
   const access = parsed.tokens?.access_token;
   const refresh = parsed.tokens?.refresh_token;
-
   if (typeof access !== "string" || typeof refresh !== "string") {
     throw new Error(`Codex auth file does not contain ChatGPT OAuth tokens: ${sourceAuthFile}`);
   }

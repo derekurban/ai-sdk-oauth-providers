@@ -1,14 +1,11 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/cli.ts"],
+  entry: ["src/index.ts", "src/cli.ts", "src/mastra.ts"],
   format: ["esm"],
   dts: true,
-  clean: true,
   sourcemap: true,
+  clean: true,
   target: "node20",
   splitting: false,
-  banner: {
-    js: "#!/usr/bin/env node",
-  },
 });

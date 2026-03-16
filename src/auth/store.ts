@@ -4,65 +4,72 @@ import { dirname } from "node:path";
 import lockfile from "proper-lockfile";
 
 import {
-  getOAuthApiKey,
   getOAuthProvider,
-  getOAuthProviders,
   type OAuthCredentials,
   type OAuthLoginCallbacks,
+  type OAuthProviderInterface,
 } from "@mariozechner/pi-ai/oauth";
 
 import {
   importOpenAICodexCredentialsFromCodexAuth,
+  loginOpenAICodexWithBrowserAuth,
   loginOpenAICodexWithDeviceAuth,
-  loginOpenAICodexWithOfficialFlow,
+  refreshOpenAICodexCredentials,
 } from "./openai-codex-login.js";
 import {
-  type PiOAuthAuthFile,
-  type PiOAuthCredentialRecord,
-  type PiOAuthProviderId,
-  type PiOAuthProviderStatus,
+  OAUTH_PROVIDER_IDS,
+  type OAuthAuthFile,
+  type OAuthCredentialRecord,
+  type OAuthProviderId,
+  type OAuthProviderStatus,
 } from "../types.js";
 
-type PiOAuthAuthData = Partial<Record<PiOAuthProviderId, PiOAuthCredentialRecord>>;
+type AuthData = Partial<Record<OAuthProviderId, OAuthCredentialRecord>>;
 
 type LockedMutationResult<T> = {
   result: T;
-  next?: PiOAuthAuthData;
+  next?: AuthData;
 };
 
-export class PiOAuthAuthStore {
-  constructor(readonly authFile: PiOAuthAuthFile) {}
+function getSupportedOAuthProvider(providerId: OAuthProviderId): OAuthProviderInterface {
+  const provider = getOAuthProvider(providerId);
+  if (!provider) {
+    throw new Error(`Unknown OAuth provider: ${providerId}`);
+  }
+  return provider;
+}
+
+export function getSupportedOAuthProviders(): OAuthProviderInterface[] {
+  return OAUTH_PROVIDER_IDS.map((providerId) => getSupportedOAuthProvider(providerId));
+}
+
+export class OAuthAuthStore {
+  constructor(readonly authFile: OAuthAuthFile) {}
 
   async login(
-    providerId: PiOAuthProviderId,
+    providerId: OAuthProviderId,
     callbacks: OAuthLoginCallbacks,
     options?: { deviceAuth?: boolean },
-  ): Promise<PiOAuthCredentialRecord> {
-    const provider = getOAuthProvider(providerId);
-    if (!provider) {
-      throw new Error(`Unknown OAuth provider: ${providerId}`);
-    }
-
+  ): Promise<OAuthCredentialRecord> {
     const credentials = providerId === "openai-codex"
       ? options?.deviceAuth
         ? await loginOpenAICodexWithDeviceAuth(callbacks)
-        : await loginOpenAICodexWithOfficialFlow(callbacks)
-      : await provider.login(callbacks);
-    const record: PiOAuthCredentialRecord = { type: "oauth", ...credentials };
+        : await loginOpenAICodexWithBrowserAuth(callbacks)
+      : await getSupportedOAuthProvider(providerId).login(callbacks);
 
+    const record: OAuthCredentialRecord = { type: "oauth", ...credentials };
     await this.writeRecord(providerId, record);
-
     return record;
   }
 
-  async importOpenAICodexAuth(sourceAuthFile: string): Promise<PiOAuthCredentialRecord> {
+  async importOpenAICodexAuth(sourceAuthFile: string): Promise<OAuthCredentialRecord> {
     const credentials = importOpenAICodexCredentialsFromCodexAuth(sourceAuthFile);
-    const record: PiOAuthCredentialRecord = { type: "oauth", ...credentials };
+    const record: OAuthCredentialRecord = { type: "oauth", ...credentials };
     await this.writeRecord("openai-codex", record);
     return record;
   }
 
-  async logout(providerId: PiOAuthProviderId): Promise<void> {
+  async logout(providerId: OAuthProviderId): Promise<void> {
     await this.withLock(async (data) => {
       const next = { ...data };
       delete next[providerId];
@@ -70,9 +77,10 @@ export class PiOAuthAuthStore {
     });
   }
 
-  async getStatus(providerId: PiOAuthProviderId): Promise<PiOAuthProviderStatus> {
+  async getStatus(providerId: OAuthProviderId): Promise<OAuthProviderStatus> {
     const data = await this.read();
     const record = data[providerId];
+
     if (!record) {
       return { providerId, stored: false };
     }
@@ -85,14 +93,12 @@ export class PiOAuthAuthStore {
     };
   }
 
-  async getRecord(providerId: PiOAuthProviderId): Promise<PiOAuthCredentialRecord | undefined> {
+  async getRecord(providerId: OAuthProviderId): Promise<OAuthCredentialRecord | undefined> {
     const data = await this.read();
     return data[providerId];
   }
 
-  async resolveApiKey(
-    providerId: PiOAuthProviderId,
-  ): Promise<{ apiKey: string; credentials: PiOAuthCredentialRecord }> {
+  async getCredentials(providerId: OAuthProviderId): Promise<OAuthCredentialRecord> {
     return this.withLock(async (data) => {
       const current = data[providerId];
       if (!current) {
@@ -100,62 +106,46 @@ export class PiOAuthAuthStore {
       }
 
       if (Date.now() < current.expires) {
-        const provider = getOAuthProvider(providerId);
-        if (!provider) {
-          throw new Error(`Unknown OAuth provider: ${providerId}`);
-        }
-
-        return {
-          result: {
-            apiKey: provider.getApiKey(current),
-            credentials: current,
-          },
-        };
+        return { result: current };
       }
 
-      const oauthEntries = Object.entries(data).filter(
-        (entry): entry is [string, PiOAuthCredentialRecord] => Boolean(entry[1]) && entry[1].type === "oauth",
-      );
+      const refreshed = providerId === "openai-codex"
+        ? await refreshOpenAICodexCredentials(current.refresh)
+        : await getSupportedOAuthProvider(providerId).refreshToken(current as OAuthCredentials);
 
-      const oauthMap = Object.fromEntries(oauthEntries) as Record<string, OAuthCredentials>;
-
-      const refreshed = await getOAuthApiKey(providerId, oauthMap);
-      if (!refreshed) {
-        throw new Error(`No stored OAuth credentials for provider: ${providerId}`);
-      }
-
-      const nextRecord: PiOAuthCredentialRecord = {
+      const nextRecord: OAuthCredentialRecord = {
+        ...current,
+        ...refreshed,
         type: "oauth",
-        ...refreshed.newCredentials,
       };
 
       return {
-        result: {
-          apiKey: refreshed.apiKey,
-          credentials: nextRecord,
+        result: nextRecord,
+        next: {
+          ...data,
+          [providerId]: nextRecord,
         },
-        next: { ...data, [providerId]: nextRecord },
       };
     });
   }
 
-  getProviders() {
-    return getOAuthProviders();
+  getProviders(): OAuthProviderInterface[] {
+    return getSupportedOAuthProviders();
   }
 
-  private async writeRecord(providerId: PiOAuthProviderId, record: PiOAuthCredentialRecord): Promise<void> {
+  private async writeRecord(providerId: OAuthProviderId, record: OAuthCredentialRecord): Promise<void> {
     await this.withLock(async (data) => ({
       result: undefined,
       next: { ...data, [providerId]: record },
     }));
   }
 
-  private async read(): Promise<PiOAuthAuthData> {
+  private async read(): Promise<AuthData> {
     this.ensureFile();
     return this.parseData(readFileSync(this.authFile, "utf8"));
   }
 
-  private async withLock<T>(mutate: (data: PiOAuthAuthData) => Promise<LockedMutationResult<T>>): Promise<T> {
+  private async withLock<T>(mutate: (data: AuthData) => Promise<LockedMutationResult<T>>): Promise<T> {
     this.ensureFile();
 
     const release = await lockfile.lock(this.authFile, {
@@ -194,9 +184,9 @@ export class PiOAuthAuthStore {
     }
   }
 
-  private parseData(content: string): PiOAuthAuthData {
+  private parseData(content: string): AuthData {
     try {
-      const parsed = JSON.parse(content) as PiOAuthAuthData;
+      const parsed = JSON.parse(content) as AuthData;
       return parsed ?? {};
     } catch (error) {
       throw new Error(`Failed to parse auth file '${this.authFile}': ${String(error)}`);

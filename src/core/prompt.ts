@@ -1,13 +1,6 @@
 import {
   InvalidPromptError,
   UnsupportedFunctionalityError,
-  type JSONValue,
-  type LanguageModelV2CallOptions,
-  type LanguageModelV2CallWarning,
-  type LanguageModelV2FunctionTool,
-  type LanguageModelV2ProviderDefinedTool,
-  type LanguageModelV2ToolChoice,
-  type LanguageModelV2ToolResultOutput,
   type LanguageModelV3CallOptions,
   type LanguageModelV3FunctionTool,
   type LanguageModelV3ProviderTool,
@@ -15,69 +8,42 @@ import {
   type LanguageModelV3ToolResultOutput,
   type SharedV3Warning,
 } from "@ai-sdk/provider";
-import type { Context, Message, Tool as PiTool, ToolResultMessage } from "@mariozechner/pi-ai";
 
-type PiStreamOptions = {
-  maxTokens?: number;
-  temperature?: number;
-  signal?: AbortSignal;
-  headers?: Record<string, string>;
-};
+import type {
+  PreparedRuntimeCall,
+  RuntimeAssistantContent,
+  RuntimeCallSettings,
+  RuntimeContext,
+  RuntimeResponseFormat,
+  RuntimeToolChoice,
+  RuntimeToolDefinition,
+  RuntimeToolResultMessage,
+  RuntimeUserTextPart,
+} from "./runtime-types.js";
 
-export interface PreparedPiCall<TWarning, TToolChoice> {
-  context: Context;
-  toolChoice?: TToolChoice;
-  streamOptions: PiStreamOptions;
-  warnings: TWarning[];
-}
-
-export function prepareV2Call(
-  options: LanguageModelV2CallOptions,
-): PreparedPiCall<LanguageModelV2CallWarning, LanguageModelV2ToolChoice> {
-  const warnings: LanguageModelV2CallWarning[] = [];
-  const tools = selectV2Tools(options.tools, options.toolChoice, warnings);
-  const context = convertPromptToContext("v2", options.prompt, tools);
-
-  pushUnsupportedV2Settings(options, warnings);
-
-  return {
-    context,
-    ...(options.toolChoice ? { toolChoice: options.toolChoice } : {}),
-    streamOptions: buildStreamOptions(options.maxOutputTokens, options.temperature, options.abortSignal, options.headers),
-    warnings,
-  };
-}
-
-export function prepareV3Call(
-  options: LanguageModelV3CallOptions,
-): PreparedPiCall<SharedV3Warning, LanguageModelV3ToolChoice> {
+export function prepareRuntimeCall(options: LanguageModelV3CallOptions): PreparedRuntimeCall {
   const warnings: SharedV3Warning[] = [];
-  const tools = selectV3Tools(options.tools, options.toolChoice, warnings);
-  const context = convertPromptToContext("v3", options.prompt, tools);
+  const tools = selectTools(options.tools, warnings);
+  const context = convertPromptToContext(options, tools, warnings);
+  const settings = buildRuntimeCallSettings(options);
 
-  pushUnsupportedV3Settings(options, warnings);
+  pushUnsupportedWarnings(options, warnings);
 
   return {
     context,
-    ...(options.toolChoice ? { toolChoice: options.toolChoice } : {}),
-    streamOptions: buildStreamOptions(options.maxOutputTokens, options.temperature, options.abortSignal, options.headers),
+    settings,
     warnings,
   };
 }
 
-function buildStreamOptions(
-  maxTokens: number | undefined,
-  temperature: number | undefined,
-  signal: AbortSignal | undefined,
-  headers: Record<string, string | undefined> | undefined,
-): PiStreamOptions {
-  const normalizedHeaders = normalizeHeaders(headers);
+function buildRuntimeCallSettings(options: LanguageModelV3CallOptions): RuntimeCallSettings {
+  const headers = normalizeHeaders(options.headers);
 
   return {
-    ...(maxTokens !== undefined ? { maxTokens } : {}),
-    ...(temperature !== undefined ? { temperature } : {}),
-    ...(signal !== undefined ? { signal } : {}),
-    ...(normalizedHeaders ? { headers: normalizedHeaders } : {}),
+    ...(options.maxOutputTokens !== undefined ? { maxOutputTokens: options.maxOutputTokens } : {}),
+    ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+    ...(options.abortSignal !== undefined ? { abortSignal: options.abortSignal } : {}),
+    ...(headers ? { headers } : {}),
   };
 }
 
@@ -90,31 +56,7 @@ function normalizeHeaders(headers: Record<string, string | undefined> | undefine
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
-function pushUnsupportedV2Settings(
-  options: LanguageModelV2CallOptions,
-  warnings: LanguageModelV2CallWarning[],
-): void {
-  const unsupportedSettings: Array<Exclude<keyof LanguageModelV2CallOptions, "prompt">> = [];
-
-  if (options.stopSequences?.length) unsupportedSettings.push("stopSequences");
-  if (options.topP !== undefined) unsupportedSettings.push("topP");
-  if (options.topK !== undefined) unsupportedSettings.push("topK");
-  if (options.presencePenalty !== undefined) unsupportedSettings.push("presencePenalty");
-  if (options.frequencyPenalty !== undefined) unsupportedSettings.push("frequencyPenalty");
-  if (options.responseFormat?.type === "json") unsupportedSettings.push("responseFormat");
-  if (options.seed !== undefined) unsupportedSettings.push("seed");
-  if (options.includeRawChunks) unsupportedSettings.push("includeRawChunks");
-
-  for (const setting of unsupportedSettings) {
-    warnings.push({
-      type: "unsupported-setting",
-      setting,
-      details: "This adapter currently supports text-first generation, streaming, and tool flow only.",
-    });
-  }
-}
-
-function pushUnsupportedV3Settings(options: LanguageModelV3CallOptions, warnings: SharedV3Warning[]): void {
+function pushUnsupportedWarnings(options: LanguageModelV3CallOptions, warnings: SharedV3Warning[]): void {
   const features: string[] = [];
 
   if (options.stopSequences?.length) features.push("stopSequences");
@@ -122,7 +64,6 @@ function pushUnsupportedV3Settings(options: LanguageModelV3CallOptions, warnings
   if (options.topK !== undefined) features.push("topK");
   if (options.presencePenalty !== undefined) features.push("presencePenalty");
   if (options.frequencyPenalty !== undefined) features.push("frequencyPenalty");
-  if (options.responseFormat?.type === "json") features.push("responseFormat");
   if (options.seed !== undefined) features.push("seed");
   if (options.includeRawChunks) features.push("includeRawChunks");
 
@@ -130,89 +71,44 @@ function pushUnsupportedV3Settings(options: LanguageModelV3CallOptions, warnings
     warnings.push({
       type: "unsupported",
       feature,
-      details: "This adapter currently supports text-first generation, streaming, and tool flow only.",
+      details: "This package currently supports text generation, streaming, tool calling, and JSON compatibility mode only.",
     });
   }
 }
 
-function selectV2Tools(
-  tools: Array<LanguageModelV2FunctionTool | LanguageModelV2ProviderDefinedTool> | undefined,
-  toolChoice: LanguageModelV2ToolChoice | undefined,
-  warnings: LanguageModelV2CallWarning[],
-): PiTool[] | undefined {
-  const supportedTools = (tools ?? []).flatMap((tool) => {
-    if (tool.type === "provider-defined") {
-      warnings.push({
-        type: "unsupported-tool",
-        tool,
-        details: "Provider-defined tools are not supported by this adapter.",
-      });
-      return [];
-    }
-
-    return [toPiTool(tool)];
-  });
-
-  return applyToolChoiceSelection(supportedTools, toolChoice);
-}
-
-function selectV3Tools(
+function selectTools(
   tools: Array<LanguageModelV3FunctionTool | LanguageModelV3ProviderTool> | undefined,
-  toolChoice: LanguageModelV3ToolChoice | undefined,
   warnings: SharedV3Warning[],
-): PiTool[] | undefined {
+): RuntimeToolDefinition[] | undefined {
   const supportedTools = (tools ?? []).flatMap((tool) => {
     if (tool.type === "provider") {
       warnings.push({
         type: "unsupported",
         feature: "provider-tools",
-        details: `Provider tool '${tool.name}' is not supported by this adapter.`,
+        details: `Provider tool '${tool.name}' is not supported by this package.`,
       });
       return [];
     }
 
-    return [toPiTool(tool)];
+    return [{
+      name: tool.name,
+      description: tool.description ?? "",
+      inputSchema: tool.inputSchema,
+    }];
   });
 
-  return applyToolChoiceSelection(supportedTools, toolChoice);
-}
-
-function toPiTool(tool: LanguageModelV2FunctionTool | LanguageModelV3FunctionTool): PiTool {
-  return {
-    name: tool.name,
-    description: tool.description ?? "",
-    parameters: tool.inputSchema as never,
-  };
-}
-
-function applyToolChoiceSelection<T extends { name: string }>(
-  tools: T[],
-  toolChoice:
-    | LanguageModelV2ToolChoice
-    | LanguageModelV3ToolChoice
-    | undefined,
-): T[] | undefined {
-  if (tools.length === 0 || toolChoice?.type === "none") {
-    return undefined;
-  }
-
-  if (toolChoice?.type === "tool") {
-    const selected = tools.find((tool) => tool.name === toolChoice.toolName);
-    return selected ? [selected] : undefined;
-  }
-
-  return tools;
+  return supportedTools.length > 0 ? supportedTools : undefined;
 }
 
 function convertPromptToContext(
-  version: "v2" | "v3",
-  prompt: LanguageModelV2CallOptions["prompt"] | LanguageModelV3CallOptions["prompt"],
-  tools: PiTool[] | undefined,
-): Context {
+  options: LanguageModelV3CallOptions,
+  tools: RuntimeToolDefinition[] | undefined,
+  warnings: SharedV3Warning[],
+): RuntimeContext {
   const systemPrompts: string[] = [];
-  const messages: Message[] = [];
+  const messages: RuntimeContext["messages"] = [];
 
-  for (const message of prompt) {
+  for (const message of options.prompt) {
     switch (message.role) {
       case "system":
         systemPrompts.push(message.content);
@@ -220,61 +116,103 @@ function convertPromptToContext(
       case "user":
         messages.push({
           role: "user",
-          content: convertUserContent(version, message.content),
-          timestamp: Date.now(),
+          content: convertUserContent(message.content),
         });
         break;
       case "assistant": {
-        const converted = convertAssistantMessage(version, message.content);
+        const converted = convertAssistantContent(message.content);
         if (converted.assistantContent.length > 0) {
           messages.push({
             role: "assistant",
             content: converted.assistantContent,
-            api: "unknown",
-            provider: "unknown",
-            model: "unknown",
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
-            stopReason: "stop",
-            timestamp: Date.now(),
           });
         }
         messages.push(...converted.toolResults);
         break;
       }
       case "tool":
-        messages.push(...convertToolMessage(version, message.content));
+        messages.push(...convertToolMessage(message.content));
         break;
       default: {
         const exhaustive: never = message;
         throw new InvalidPromptError({
-          prompt,
+          prompt: options.prompt,
           message: `Unsupported prompt message: ${JSON.stringify(exhaustive)}`,
         });
       }
     }
   }
 
+  const responseFormat = buildResponseFormat(options.responseFormat, warnings);
+
+  if (responseFormat.type === "json") {
+    systemPrompts.push(responseFormat.instruction);
+  }
+
   return {
     ...(systemPrompts.length > 0 ? { systemPrompt: systemPrompts.join("\n\n") } : {}),
     messages,
     ...(tools ? { tools } : {}),
+    ...(options.toolChoice ? { toolChoice: mapToolChoice(options.toolChoice) } : {}),
+    responseFormat,
   };
 }
 
+function buildResponseFormat(
+  responseFormat: LanguageModelV3CallOptions["responseFormat"],
+  warnings: SharedV3Warning[],
+): RuntimeResponseFormat {
+  if (!responseFormat || responseFormat.type === "text") {
+    return { type: "text" };
+  }
+
+  warnings.push({
+    type: "unsupported",
+    feature: "native-json-schema",
+    details: "Using compatibility JSON mode instead of a provider-native JSON schema contract.",
+  });
+
+  const schemaDescription = responseFormat.schema ? `Schema: ${JSON.stringify(responseFormat.schema)}` : "";
+  const nameDescription = responseFormat.name ? `Name: ${responseFormat.name}` : "";
+  const outputDescription = responseFormat.description ? `Description: ${responseFormat.description}` : "";
+  const instruction = [
+    "Return only valid JSON.",
+    "Do not wrap the JSON in markdown fences or prose.",
+    nameDescription,
+    outputDescription,
+    schemaDescription,
+  ].filter(Boolean).join("\n");
+
+  return {
+    type: "json",
+    instruction,
+    ...(responseFormat.schema ? { schema: responseFormat.schema } : {}),
+  };
+}
+
+function mapToolChoice(toolChoice: LanguageModelV3ToolChoice): RuntimeToolChoice {
+  switch (toolChoice.type) {
+    case "auto":
+      return { type: "auto" };
+    case "none":
+      return { type: "none" };
+    case "required":
+      return { type: "required" };
+    case "tool":
+      return { type: "tool", toolName: toolChoice.toolName };
+    default: {
+      const exhaustive: never = toolChoice;
+      return exhaustive;
+    }
+  }
+}
+
 function convertUserContent(
-  version: "v2" | "v3",
-  content: Array<{ type: string; text?: string; mediaType?: string; data?: unknown; url?: string }>,
-): string | Array<{ type: "text"; text: string }> {
+  content: Array<{ type: string; text?: string }>,
+): string | RuntimeUserTextPart[] {
   const textParts = content.map((part) => {
     if (part.type !== "text") {
-      throw unsupportedPromptPart(version, "user", part.type);
+      throw unsupportedPromptPart("user", part.type);
     }
     return { type: "text" as const, text: part.text ?? "" };
   });
@@ -290,23 +228,14 @@ function convertUserContent(
   return textParts;
 }
 
-function convertAssistantMessage(
-  version: "v2" | "v3",
+function convertAssistantContent(
   content: Array<{ type: string; text?: string; toolCallId?: string; toolName?: string; input?: unknown; output?: unknown }>,
 ): {
-  assistantContent: Array<
-    | { type: "text"; text: string }
-    | { type: "thinking"; thinking: string }
-    | { type: "toolCall"; id: string; name: string; arguments: Record<string, JSONValue> }
-  >;
-  toolResults: ToolResultMessage[];
+  assistantContent: RuntimeAssistantContent[];
+  toolResults: RuntimeToolResultMessage[];
 } {
-  const assistantContent: Array<
-    | { type: "text"; text: string }
-    | { type: "thinking"; thinking: string }
-    | { type: "toolCall"; id: string; name: string; arguments: Record<string, JSONValue> }
-  > = [];
-  const toolResults: ToolResultMessage[] = [];
+  const assistantContent: RuntimeAssistantContent[] = [];
+  const toolResults: RuntimeToolResultMessage[] = [];
 
   for (const part of content) {
     switch (part.type) {
@@ -325,14 +254,14 @@ function convertAssistantMessage(
         });
         break;
       case "tool-result":
-        toolResults.push(toToolResultMessage(version, {
+        toolResults.push(toToolResultMessage({
           toolCallId: part.toolCallId ?? "",
           toolName: part.toolName ?? "",
-          output: part.output,
+          output: part.output as LanguageModelV3ToolResultOutput,
         }));
         break;
       default:
-        throw unsupportedPromptPart(version, "assistant", part.type);
+        throw unsupportedPromptPart("assistant", part.type);
     }
   }
 
@@ -340,29 +269,27 @@ function convertAssistantMessage(
 }
 
 function convertToolMessage(
-  version: "v2" | "v3",
   content: Array<{ type: string; toolCallId?: string; toolName?: string; output?: unknown }>,
-): ToolResultMessage[] {
+): RuntimeToolResultMessage[] {
   return content.map((part) => {
     if (part.type !== "tool-result") {
-      throw unsupportedPromptPart(version, "tool", part.type);
+      throw unsupportedPromptPart("tool", part.type);
     }
 
-    return toToolResultMessage(version, {
+    return toToolResultMessage({
       toolCallId: part.toolCallId ?? "",
       toolName: part.toolName ?? "",
-      output: part.output,
+      output: part.output as LanguageModelV3ToolResultOutput,
     });
   });
 }
 
-function toToolResultMessage(
-  version: "v2" | "v3",
-  part: { toolCallId: string; toolName: string; output: unknown },
-): ToolResultMessage {
-  const output = version === "v2"
-    ? convertV2ToolResultOutput(part.output as LanguageModelV2ToolResultOutput)
-    : convertV3ToolResultOutput(part.output as LanguageModelV3ToolResultOutput);
+function toToolResultMessage(part: {
+  toolCallId: string;
+  toolName: string;
+  output: LanguageModelV3ToolResultOutput;
+}): RuntimeToolResultMessage {
+  const output = convertToolResultOutput(part.output);
 
   return {
     role: "toolResult",
@@ -370,47 +297,10 @@ function toToolResultMessage(
     toolName: part.toolName,
     content: output.content,
     isError: output.isError,
-    timestamp: Date.now(),
   };
 }
 
-function convertV2ToolResultOutput(output: LanguageModelV2ToolResultOutput): {
-  content: Array<{ type: "text"; text: string }>;
-  isError: boolean;
-} {
-  switch (output.type) {
-    case "text":
-      return { content: [{ type: "text", text: output.value }], isError: false };
-    case "json":
-      return { content: [{ type: "text", text: JSON.stringify(output.value) }], isError: false };
-    case "error-text":
-      return { content: [{ type: "text", text: output.value }], isError: true };
-    case "error-json":
-      return { content: [{ type: "text", text: JSON.stringify(output.value) }], isError: true };
-    case "content":
-      return {
-        content: output.value.map((part) => {
-          if (part.type !== "text") {
-            throw new UnsupportedFunctionalityError({
-              functionality: "tool result media parts",
-              message: "This adapter only supports text tool result content.",
-            });
-          }
-          return { type: "text" as const, text: part.text };
-        }),
-        isError: false,
-      };
-    default: {
-      const exhaustive: never = output;
-      throw new InvalidPromptError({
-        prompt: output,
-        message: `Unsupported tool result output: ${JSON.stringify(exhaustive)}`,
-      });
-    }
-  }
-}
-
-function convertV3ToolResultOutput(output: LanguageModelV3ToolResultOutput): {
+function convertToolResultOutput(output: LanguageModelV3ToolResultOutput): {
   content: Array<{ type: "text"; text: string }>;
   isError: boolean;
 } {
@@ -431,7 +321,7 @@ function convertV3ToolResultOutput(output: LanguageModelV3ToolResultOutput): {
           if (part.type !== "text") {
             throw new UnsupportedFunctionalityError({
               functionality: "tool result multimodal content",
-              message: "This adapter only supports text tool result content.",
+              message: "This package only supports text tool result content.",
             });
           }
           return { type: "text" as const, text: part.text };
@@ -448,7 +338,7 @@ function convertV3ToolResultOutput(output: LanguageModelV3ToolResultOutput): {
   }
 }
 
-function requireJSONObject(value: unknown, field: string): Record<string, JSONValue> {
+function requireJSONObject(value: unknown, field: string): Record<string, unknown> {
   if (!value || Array.isArray(value) || typeof value !== "object") {
     throw new InvalidPromptError({
       prompt: value,
@@ -456,12 +346,12 @@ function requireJSONObject(value: unknown, field: string): Record<string, JSONVa
     });
   }
 
-  return value as Record<string, JSONValue>;
+  return value as Record<string, unknown>;
 }
 
-function unsupportedPromptPart(version: "v2" | "v3", role: string, type: string): UnsupportedFunctionalityError {
+function unsupportedPromptPart(role: string, type: string): UnsupportedFunctionalityError {
   return new UnsupportedFunctionalityError({
-    functionality: `${version}:${role}:${type}`,
-    message: `Prompt part '${type}' in ${role} messages is not supported by this adapter.`,
+    functionality: `languageModelV3:${role}:${type}`,
+    message: `Prompt part '${type}' in ${role} messages is not supported by this package.`,
   });
 }

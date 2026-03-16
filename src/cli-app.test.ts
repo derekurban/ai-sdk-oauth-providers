@@ -1,113 +1,175 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const cliMocks = vi.hoisted(() => ({
-  getOAuthProviders: vi.fn(),
+const questionMock = vi.fn(async () => "manual-code");
+const closeMock = vi.fn();
+const spawnMock = vi.fn(() => ({
+  on: vi.fn(),
+  unref: vi.fn(),
+}));
+
+const authStoreMocks = {
+  getProviders: vi.fn(),
   getStatus: vi.fn(),
   login: vi.fn(),
   logout: vi.fn(),
   importOpenAICodexAuth: vi.fn(),
-  runInteractiveUi: vi.fn(),
-  resolveDefaultCodexAuthFile: vi.fn(),
-  authStoreCtor: vi.fn(),
+};
+
+vi.mock("node:readline/promises", () => ({
+  createInterface: vi.fn(() => ({
+    question: questionMock,
+    close: closeMock,
+  })),
 }));
 
-vi.mock("@mariozechner/pi-ai/oauth", () => ({
-  getOAuthProviders: cliMocks.getOAuthProviders,
-}));
-
-vi.mock("./auth/openai-codex-login.js", () => ({
-  resolveDefaultCodexAuthFile: cliMocks.resolveDefaultCodexAuthFile,
-}));
-
-vi.mock("./cli-ui.js", () => ({
-  runInteractiveUi: cliMocks.runInteractiveUi,
+vi.mock("node:child_process", () => ({
+  spawn: spawnMock,
 }));
 
 vi.mock("./auth/store.js", () => ({
-  PiOAuthAuthStore: class {
-    authFile: string;
+  OAuthAuthStore: class OAuthAuthStore {
+    constructor(readonly authFile: string) {}
 
-    constructor(authFile: string) {
-      this.authFile = authFile;
-      cliMocks.authStoreCtor(authFile);
+    getProviders() {
+      return authStoreMocks.getProviders();
     }
 
-    getStatus = cliMocks.getStatus;
-    login = cliMocks.login;
-    logout = cliMocks.logout;
-    importOpenAICodexAuth = cliMocks.importOpenAICodexAuth;
+    getStatus(providerId: string) {
+      return authStoreMocks.getStatus(providerId);
+    }
+
+    login(providerId: string, callbacks: unknown, options?: unknown) {
+      return authStoreMocks.login(providerId, callbacks, options);
+    }
+
+    logout(providerId: string) {
+      return authStoreMocks.logout(providerId);
+    }
+
+    importOpenAICodexAuth(sourceAuthFile: string) {
+      return authStoreMocks.importOpenAICodexAuth(sourceAuthFile);
+    }
   },
 }));
 
-import { runCli } from "./cli-app.js";
+const { runCli } = await import("./cli-app.js");
 
 describe("runCli", () => {
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
-    cliMocks.getOAuthProviders.mockReset();
-    cliMocks.getStatus.mockReset();
-    cliMocks.login.mockReset();
-    cliMocks.logout.mockReset();
-    cliMocks.importOpenAICodexAuth.mockReset();
-    cliMocks.runInteractiveUi.mockReset();
-    cliMocks.resolveDefaultCodexAuthFile.mockReset();
-    cliMocks.authStoreCtor.mockReset();
+    vi.clearAllMocks();
+    questionMock.mockResolvedValue("manual-code");
+
+    stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    stdoutSpy.mockRestore();
+    stderrSpy.mockRestore();
   });
 
-  it("prints available providers", async () => {
-    cliMocks.getOAuthProviders.mockReturnValue([
+  function joinedOutput(spy: typeof stdoutSpy): string {
+    return spy.mock.calls.map((call: [unknown, ...unknown[]]) => String(call[0])).join("");
+  }
+
+  it("prints the supported providers", async () => {
+    authStoreMocks.getProviders.mockReturnValue([
       { id: "anthropic", name: "Anthropic", usesCallbackServer: true },
+      { id: "openai-codex", name: "OpenAI Codex", usesCallbackServer: true },
     ]);
 
     await runCli(["providers"]);
 
-    expect(cliMocks.getOAuthProviders).toHaveBeenCalledTimes(1);
+    const output = joinedOutput(stdoutSpy);
+    expect(output).toContain("anthropic\tAnthropic\tcallback-server\n");
+    expect(output).toContain("openai-codex\tOpenAI Codex\tcallback-server\n");
   });
 
-  it("prints provider status", async () => {
-    cliMocks.getStatus.mockResolvedValue({
+  it("prints status for a provider", async () => {
+    authStoreMocks.getStatus.mockResolvedValue({
       providerId: "anthropic",
       stored: true,
       expired: false,
-      expiresAt: 1_700_000_000_000,
+      expiresAt: Date.parse("2026-03-17T00:00:00.000Z"),
     });
 
-    await runCli(["status", "--provider", "anthropic", "--auth-file", "D:/tmp/auth.json"]);
+    await runCli(["status", "--provider", "anthropic", "--auth-file", "./oauth.json"]);
 
-    expect(cliMocks.authStoreCtor).toHaveBeenCalledWith("D:/tmp/auth.json");
-    expect(cliMocks.getStatus).toHaveBeenCalledWith("anthropic");
+    const output = joinedOutput(stdoutSpy);
+    expect(output).toContain("anthropic\n");
+    expect(output).toContain("stored: true\n");
+    expect(output).toContain("expired: false\n");
+    expect(output).toContain("expiresAt: 2026-03-17T00:00:00.000Z\n");
   });
 
-  it("passes the device auth flag through to login", async () => {
-    cliMocks.login.mockResolvedValue({
-      expires: 1_700_000_000_000,
+  it("runs Codex device auth login", async () => {
+    authStoreMocks.login.mockImplementation(async (_providerId: string, callbacks: any, options?: unknown) => {
+      callbacks.onAuth({
+        url: "https://auth.openai.com/codex/device",
+        instructions: "Enter code: ABCD-EFGH",
+      });
+      callbacks.onProgress?.("Waiting for device auth");
+      await callbacks.onManualCodeInput?.();
+      return {
+        type: "oauth",
+        access: "access-token",
+        refresh: "refresh-token",
+        expires: Date.parse("2026-03-17T00:00:00.000Z"),
+        accountId: "acct_test",
+      };
     });
 
-    await runCli(["login", "--provider", "openai-codex", "--auth-file", "D:/tmp/auth.json", "--device-auth"]);
+    await runCli(["login", "--provider", "openai-codex", "--auth-file", "./oauth.json", "--device-auth"]);
 
-    expect(cliMocks.login.mock.calls[0]?.[2]).toEqual({ deviceAuth: true });
+    expect(authStoreMocks.login).toHaveBeenCalledWith(
+      "openai-codex",
+      expect.any(Object),
+      { deviceAuth: true },
+    );
+    const stderrOutput = joinedOutput(stderrSpy);
+    const stdoutOutput = joinedOutput(stdoutSpy);
+    expect(stderrOutput).toContain("Open this URL to continue authentication:\nhttps://auth.openai.com/codex/device\n");
+    expect(stderrOutput).toContain("Enter code: ABCD-EFGH\n");
+    expect(stdoutOutput).toContain("Stored OAuth credentials for openai-codex in ./oauth.json\n");
+    expect(stdoutOutput).toContain("expiresAt: 2026-03-17T00:00:00.000Z\n");
+    expect(questionMock).toHaveBeenCalledWith("Paste the callback URL or device code: ");
+    expect(closeMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock).toHaveBeenCalled();
   });
 
-  it("imports Codex auth from the detected default path", async () => {
-    cliMocks.resolveDefaultCodexAuthFile.mockReturnValue("D:/Users/test/.codex/auth.json");
-    cliMocks.importOpenAICodexAuth.mockResolvedValue({
-      expires: 1_700_000_000_000,
+  it("imports Codex auth from a provided source", async () => {
+    authStoreMocks.importOpenAICodexAuth.mockResolvedValue({
+      type: "oauth",
+      access: "access-token",
+      refresh: "refresh-token",
+      expires: Date.parse("2026-03-17T00:00:00.000Z"),
+      accountId: "acct_test",
     });
 
-    await runCli(["import-codex-auth", "--auth-file", "D:/tmp/auth.json"]);
+    await runCli([
+      "import-codex-auth",
+      "--auth-file",
+      "./oauth.json",
+      "--source",
+      "./codex-auth.json",
+    ]);
 
-    expect(cliMocks.importOpenAICodexAuth).toHaveBeenCalledWith("D:/Users/test/.codex/auth.json");
+    expect(authStoreMocks.importOpenAICodexAuth).toHaveBeenCalledWith("./codex-auth.json");
+    const output = joinedOutput(stdoutSpy);
+    expect(output).toContain("Imported OpenAI Codex credentials from ./codex-auth.json\n");
+    expect(output).toContain("expiresAt: 2026-03-17T00:00:00.000Z\n");
   });
 
-  it("runs the interactive UI command", async () => {
-    await runCli(["ui", "--auth-file", "D:/tmp/auth.json", "--codex-home", "D:/Users/test/.codex"]);
+  it("logs out a provider", async () => {
+    authStoreMocks.logout.mockResolvedValue(undefined);
 
-    expect(cliMocks.runInteractiveUi).toHaveBeenCalledWith({
-      authFile: "D:/tmp/auth.json",
-      codexHome: "D:/Users/test/.codex",
-    });
+    await runCli(["logout", "--provider", "google-gemini-cli", "--auth-file", "./oauth.json"]);
+
+    expect(authStoreMocks.logout).toHaveBeenCalledWith("google-gemini-cli");
+    const output = joinedOutput(stdoutSpy);
+    expect(output).toContain("Removed stored OAuth credentials for google-gemini-cli\n");
   });
 });
