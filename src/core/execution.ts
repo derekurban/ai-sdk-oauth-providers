@@ -115,16 +115,31 @@ async function resolveRuntimeRequest<TWarning>(
   const { apiKey, credentials } = await loadApiKey(options.authStore, options.providerId);
   const model = resolvePiModel(options.providerId, options.modelId, credentials);
   const choice = mapToolChoice(model.api, prepared.toolChoice, prepared.warnings, warningMode);
+  const context = ensureProviderContext(model.api, prepared.context);
 
   return {
     model,
-    context: prepared.context,
+    context,
     streamOptions: {
       ...prepared.streamOptions,
       ...choice,
       apiKey,
     },
     warnings: prepared.warnings,
+  };
+}
+
+function ensureProviderContext(
+  api: Api,
+  context: PreparedPiCall<unknown, unknown>["context"],
+): PreparedPiCall<unknown, unknown>["context"] {
+  if (api !== "openai-codex-responses" || context.systemPrompt?.trim()) {
+    return context;
+  }
+
+  return {
+    ...context,
+    systemPrompt: "You are a helpful assistant.",
   };
 }
 

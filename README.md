@@ -31,41 +31,56 @@ npm install pi-oauth-ai-sdk
 
 ## Quick Start
 
-First, authenticate a provider and write credentials to an auth file:
-
-```bash
-npx pi-oauth-ai-sdk login --provider anthropic --auth-file ./.auth/pi-oauth.json
-```
-
-For OpenAI Codex, you can also use device auth:
-
-```bash
-npx pi-oauth-ai-sdk login --provider openai-codex --auth-file ./.auth/pi-oauth.json --device-auth
-```
-
-Or import an existing official Codex login:
+If you already use the official Codex CLI, import that login into a local auth file:
 
 ```bash
 npx pi-oauth-ai-sdk import-codex-auth --auth-file ./.auth/pi-oauth.json
 ```
 
+If you want this package to handle Codex login directly, use device auth:
+
+```bash
+npx pi-oauth-ai-sdk login --provider openai-codex --auth-file ./.auth/pi-oauth.json --device-auth
+```
+
+You can also use the browser login flow:
+
+```bash
+npx pi-oauth-ai-sdk login --provider openai-codex --auth-file ./.auth/pi-oauth.json
+```
+
 Then use that auth file from your application:
 
 ```ts
-import { generateText } from "ai";
-import { createAnthropicProvider } from "pi-oauth-ai-sdk";
+import { generateText, streamText } from "ai";
+import { createOpenAICodexProvider } from "pi-oauth-ai-sdk";
 
-const provider = createAnthropicProvider({
+const provider = createOpenAICodexProvider({
   authFile: "./.auth/pi-oauth.json",
 });
 
+const model = provider.languageModelV3("gpt-5.4");
+
 const result = await generateText({
-  model: provider.languageModelV3("claude-sonnet-4-5"),
-  prompt: "Write a short release note for a new SDK package.",
+  model,
+  prompt: "Reply with exactly: pong-from-codex",
+  maxOutputTokens: 32,
 });
 
 console.log(result.text);
+
+const streamed = streamText({
+  model,
+  prompt: "Reply with exactly: streamed-pong-from-codex",
+  maxOutputTokens: 32,
+});
+
+for await (const chunk of streamed.textStream) {
+  process.stdout.write(chunk);
+}
 ```
+
+That flow was tested live against imported Codex credentials during package development.
 
 ## API
 
@@ -95,11 +110,11 @@ Each provider instance exposes:
 
 ```bash
 pi-oauth-ai-sdk providers
-pi-oauth-ai-sdk login --provider anthropic --auth-file ./.auth/pi-oauth.json
-pi-oauth-ai-sdk login --provider openai-codex --auth-file ./.auth/pi-oauth.json --device-auth
 pi-oauth-ai-sdk import-codex-auth --auth-file ./.auth/pi-oauth.json
-pi-oauth-ai-sdk status --provider anthropic --auth-file ./.auth/pi-oauth.json
-pi-oauth-ai-sdk logout --provider anthropic --auth-file ./.auth/pi-oauth.json
+pi-oauth-ai-sdk login --provider openai-codex --auth-file ./.auth/pi-oauth.json --device-auth
+pi-oauth-ai-sdk login --provider openai-codex --auth-file ./.auth/pi-oauth.json
+pi-oauth-ai-sdk status --provider openai-codex --auth-file ./.auth/pi-oauth.json
+pi-oauth-ai-sdk logout --provider openai-codex --auth-file ./.auth/pi-oauth.json
 pi-oauth-ai-sdk ui --auth-file ./.auth/pi-oauth.json
 ```
 
@@ -129,7 +144,7 @@ Example:
 
 ```json
 {
-  "anthropic": {
+  "openai-codex": {
     "type": "oauth",
     "access": "...",
     "refresh": "...",
