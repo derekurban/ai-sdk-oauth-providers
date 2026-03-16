@@ -54,18 +54,25 @@ export function buildOpenAICodexAuthorizeUrl(input: {
   state: string;
   originator?: string;
 }): string {
-  const url = new URL(AUTHORIZE_URL);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("client_id", CLIENT_ID);
-  url.searchParams.set("redirect_uri", input.redirectUri);
-  url.searchParams.set("scope", SCOPE);
-  url.searchParams.set("code_challenge", input.challenge);
-  url.searchParams.set("code_challenge_method", "S256");
-  url.searchParams.set("id_token_add_organizations", "true");
-  url.searchParams.set("codex_cli_simplified_flow", "true");
-  url.searchParams.set("state", input.state);
-  url.searchParams.set("originator", input.originator ?? ORIGINATOR);
-  return url.toString();
+  const originator = input.originator ?? ORIGINATOR;
+  const params: Array<[string, string]> = [
+    ["response_type", "code"],
+    ["client_id", CLIENT_ID],
+    ["redirect_uri", input.redirectUri],
+    ["scope", SCOPE],
+    ["code_challenge", input.challenge],
+    ["code_challenge_method", "S256"],
+    ["id_token_add_organizations", "true"],
+    ["codex_cli_simplified_flow", "true"],
+    ["state", input.state],
+    ["originator", originator],
+  ];
+
+  const query = params
+    .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+    .join("&");
+
+  return `${AUTHORIZE_URL}?${query}`;
 }
 
 function parseAuthorizationInput(input: string): { code?: string; state?: string } {
